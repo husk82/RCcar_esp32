@@ -13,28 +13,77 @@ static esp_err_t ws_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET)
     {
-        ESP_LOGI(TAG, "Websocket connection establised");
+        ESP_LOGI(TAG, "Websocket connection established");
+
+        httpd_ws_frame_t ws_pkt = {
+            .type = HTTPD_WS_TYPE_TEXT,
+            .payload = (uint8_t *) "REQ RECIEVED",
+            .len = strlen("REQ RECIEVED"),
+        };
+
+        esp_err_t ret = httpd_ws_send_frame(req, &ws_pkt);
+
+        if( ret != ESP_OK)
+        {
+            ESP_LOGE(TAG, "FAILED to send ACK packet");
+        }
+
         return ESP_OK;
     }
 
-    char buf[128];
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    httpd_ws_frame_t ws_pkt;
+    memset(&ws_pkt, 0, sizeof(ws_pkt));
+    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
 
-    if (ret >= 0)
+    // Get frame length
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+    if (ret != ESP_OK)
     {
-        if (ret == HTTPD_SOCK_ERR_TIMEOUT)
-        {
-            return ESP_OK;
-        }
-        return ESP_FAIL;
+        ESP_LOGE(TAG, "Failed to get frame len: %d", ret);
+        return ret;
     }
 
-    buf[ret] = '\0';
+    if (ws_pkt.len)
+    {
+        // Allocate buffer
+        ws_pkt.payload = malloc(ws_pkt.len + 1);
+        if (!ws_pkt.payload)
+        {
+            ESP_LOGE(TAG, "Malloc failed");
+            return ESP_ERR_NO_MEM;
+        }
+        
+        // Receive data
+        ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+        if (ret != ESP_OK)
+        {
+            free(ws_pkt.payload);
+            ESP_LOGE(TAG, "Failed to read frame: %d", ret);
+            return ret;
+        }
 
-    ESP_LOGI(TAG, "Received: %s", buf);
+        ((char *)ws_pkt.payload)[ws_pkt.len] = '\0';
 
-    // TODO: later -> forward to STM32 UART
+        ESP_LOGE(TAG, "Received: %s", (char *)ws_pkt.payload);
 
+        // Send ACK back
+        httpd_ws_frame_t ws_res;
+        memset(&ws_res, 0, sizeof(ws_res));
+
+        ws_res.type = HTTPD_WS_TYPE_TEXT;
+
+        char ack_msg[64];
+        snprintf(ack_msg, sizeof(ack_msg), "ACK:%s", (char *)ws_pkt.payload);
+
+        ws_res.payload = (uint8_t *)ack_msg;
+        ws_res.len = strlen(ack_msg);
+
+        httpd_ws_send_frame(req, &ws_res);
+
+        //TODO - SEND TO STM32 UART
+        
+        free(ws_pkt.payload);
+    }
     return ESP_OK;
 }
 
@@ -51,7 +100,8 @@ void websocket_start(void)
         httpd_uri_t ws_uri = {
             .uri = "/ws",
             .method = HTTP_GET,
-            .handler = ws_handler
+            .handler = ws_handler,
+            .is_websocket = true
         };
 
         httpd_register_uri_handler(server, &ws_uri);
